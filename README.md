@@ -3,9 +3,11 @@
 A Pebble watchface modelled on the single-phase electricity meters found in Indian homes. Time is read off a mechanical register, the meter disc turns with your activity, and the nameplate carries live data from the watch and phone.
 
 <p align="center">
-  <img src="screenshots/emery.png" width="200" alt="Pebble Time 2">
+  <img src="screenshots/emery.png" width="200" alt="Indian meter style">
   &nbsp;
-  <img src="screenshots/emery-saver.png" width="200" alt="Pebble Time 2, battery saver">
+  <img src="screenshots/emery-euro.png" width="200" alt="European meter style">
+  &nbsp;
+  <img src="screenshots/emery-saver.png" width="200" alt="Battery saver">
 </p>
 
 <p align="center">
@@ -27,6 +29,15 @@ A Pebble watchface modelled on the single-phase electricity meters found in Indi
 | **Seal** | Shows `BT` when the phone is connected, `NC` with a double vibration when it drops. |
 | **Details** | Hazard and Class II symbols, ISI mark, and a barcode and serial that change daily. |
 
+## Meter styles
+
+| Style | Description |
+|---|---|
+| Indian *(default)* | Clean static-meter nameplate with ISI mark, ratings row and rotating disc. |
+| European | Weathered plate with screws and rust, a test dial whose needle follows the disc, a date sticker, heart rate in the rotation arrow, and rows for activity, sunset, distance, day of year and sleep. Weather adds daily high, low and humidity. |
+
+The European style is available on rectangular watches; Pebble Time Round uses the Indian style.
+
 ## Battery saver
 
 | Mode | Behaviour |
@@ -43,6 +54,7 @@ All options are available from the watchface settings in the Pebble app.
 
 | Setting | Default |
 |---|---|
+| Meter style | Indian |
 | Nameplate text | `PEBBLE TIME` |
 | Ratings row | Live (weather / steps / kcal) or classic (240 V / 5-30 A / 50 Hz) |
 | Disc speed follows activity | On |
@@ -80,7 +92,7 @@ pebble install --phone <phone-ip>
 src/c/main.c          watchface
 src/pkjs/index.js     phone side: settings and weather
 src/pkjs/config.js    settings page (Clay)
-resources/            drum font and ISI mark
+resources/            drum font, ISI mark and plate textures
 ```
 
 ## Credits
