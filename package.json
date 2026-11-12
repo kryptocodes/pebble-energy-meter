@@ -37,7 +37,12 @@
       "RequestWeather",
       "PowerMode",
       "SaverBelow",
-      "ShakeSeconds"
+      "ShakeSeconds",
+      "TempHigh",
+      "TempLow",
+      "Humidity",
+      "Sunset",
+      "Theme"
     ],
     "resources": {
       "media": [
@@ -90,6 +95,23 @@
           "type": "bitmap",
           "name": "IMAGE_ISI",
           "file": "images/isi_36.png",
+          "targetPlatforms": [
+            "emery"
+          ]
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_PLATE",
+          "file": "images/plate_144.png",
+          "targetPlatforms": [
+            "basalt",
+            "chalk"
+          ]
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_PLATE",
+          "file": "images/plate_200.png",
           "targetPlatforms": [
             "emery"
           ]

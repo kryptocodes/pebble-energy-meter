@@ -6,6 +6,16 @@ module.exports = [
     "items": [
       { "type": "heading", "defaultValue": "Nameplate" },
       {
+        "type": "radiogroup",
+        "messageKey": "Theme",
+        "label": "Meter style",
+        "defaultValue": "india",
+        "options": [
+          { "label": "Indian static meter", "value": "india" },
+          { "label": "European meter with test dial", "value": "euro" }
+        ]
+      },
+      {
         "type": "input",
         "messageKey": "PlateText",
         "defaultValue": "PEBBLE TIME",

@@ -47,17 +47,29 @@ static int32_t s_disc_step = DISC_STEP_MIN;
 
 // Health
 static char s_steps[20] = "-- steps", s_kcal[16] = "-- kcal";
+static char s_dist[16] = "-- km", s_sleep[24] = "--", s_activity[40] = "-- / -- / --";
+static int s_kcal_v = -1, s_active_min = -1;
 
 // Weather (fetched by the phone), kept across restarts
 #define WEATHER_KEY 2
 static char s_weather[24] = "-- \u00B0";
+#define WX_KEY 3
+typedef struct {
+  bool valid;
+  int16_t temp, hi, lo;
+  uint8_t hum;
+  char cond[12];
+  char sunset[6];
+} Weather;
+static Weather s_wx;
 static int s_steps_today = -1, s_steps_last_min = -1, s_spm, s_hr;
 
-static char s_day[8], s_date[12], s_batt[8], s_serial[20];
+static char s_day[8], s_date[12], s_batt[8], s_serial[20], s_iso[16], s_yday[12];
 static uint32_t s_barcode_seed;
 static bool s_bt_connected = true;
 
-static GFont s_digit_font, s_kwh_font, s_info_font, s_tiny_font;
+static GFont s_digit_font, s_kwh_font, s_info_font, s_tiny_font, s_label_font, s_plate_font;
+static int s_plate_fh;
 static GBitmap *s_isi_bmp;
 static bool s_big;
 
@@ -76,10 +88,15 @@ typedef struct {
   uint8_t power_mode;    // POWER_NORMAL / POWER_AUTO / POWER_SAVER
   uint8_t saver_below;   // auto saver threshold, battery %
   bool shake_seconds;    // in saver, a wrist flick shows seconds for a while
+  uint8_t theme;         // THEME_INDIA / THEME_EURO
 } Settings;
 static Settings s_cfg;
 
 enum { POWER_NORMAL = 0, POWER_AUTO = 1, POWER_SAVER = 2 };
+enum { THEME_INDIA = 0, THEME_EURO = 1 };
+
+// The European face is too dense for the round screen.
+static bool is_euro(void) { return PBL_IF_ROUND_ELSE(false, s_cfg.theme == THEME_EURO); }
 #define PEEK_MS 30000
 
 // Battery saver state
@@ -207,6 +224,354 @@ static void draw_barcode(GContext *ctx, GRect r) {
   graphics_fill_rect(ctx, GRect(end - 1, r.origin.y, 1, r.size.h + 3), 0, GCornerNone);
 }
 
+// ---------------------------------------------------------------- European face
+// Screw positions (design units) - also used to place rust in the grime map.
+static const int16_t s_screws[][2] = {{9, 21}, {8, 95}, {136, 95}};
+#define NUM_SCREWS 3
+
+// Slotted screw head: shaded dome, dark slot, small highlight.
+__attribute__((unused)) static void draw_screw(GContext *ctx, GPoint c, int r) {
+  graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(GColorLightGray, GColorWhite));
+  graphics_fill_circle(ctx, c, r);
+#if defined(PBL_COLOR)
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_circle(ctx, GPoint(c.x - r / 3, c.y - r / 3), r / 2);
+#endif
+  graphics_context_set_stroke_color(ctx, COL_INK);
+  graphics_draw_circle(ctx, c, r);
+  int d = r * 7 / 10;
+  graphics_context_set_stroke_width(ctx, r >= 5 ? 2 : 1);
+  graphics_draw_line(ctx, GPoint(c.x - d, c.y + d / 2), GPoint(c.x + d, c.y - d / 2));
+  graphics_context_set_stroke_width(ctx, 1);
+}
+
+// ---- plate texture: a dithered photo-style PNG on colour watches,
+// procedural grime on black & white ones
+static GBitmap *s_grime;
+static uint32_t s_rng;
+static int rnd(int n) {
+  s_rng = s_rng * 1103515245u + 12345u;
+  return (int)((s_rng >> 16) % (uint32_t)n);
+}
+
+// v: 0 = clean, 1 = light dust, 2 = dark speck, 3 = rust
+static void grime_put(int x, int y, int v) {
+  GBitmapDataRowInfo row = gbitmap_get_data_row_info(s_grime, y);
+  if (x < row.min_x || x > row.max_x) return;
+#if defined(PBL_COLOR)
+  uint8_t *b = &row.data[x / 4];
+  int sh = (3 - x % 4) * 2;
+  *b = (*b & ~(3 << sh)) | (v << sh);
+#else
+  if (v == 1) return;  // dust is invisible on B/W
+  row.data[x / 8] &= ~(1 << (x % 8));  // black speck
+#endif
+}
+
+__attribute__((unused)) static void grime_build(GSize sz) {
+  if (s_grime) gbitmap_destroy(s_grime);
+#if defined(PBL_COLOR)
+  static GColor pal[4];
+  pal[0] = GColorClear;
+  pal[1] = GColorLightGray;
+  pal[2] = GColorDarkGray;
+  pal[3] = GColorWindsorTan;
+  s_grime = gbitmap_create_blank_with_palette(sz, GBitmapFormat2BitPalette, pal, false);
+#else
+  s_grime = gbitmap_create_blank(sz, GBitmapFormat1Bit);
+  for (int y = 0; y < sz.h; y++) {
+    GBitmapDataRowInfo row = gbitmap_get_data_row_info(s_grime, y);
+    memset(row.data, 0xFF, gbitmap_get_bytes_per_row(s_grime));
+  }
+#endif
+  if (!s_grime) return;
+  s_rng = 1234567u;
+  int w = sz.w, h = sz.h;
+  int band = w / 12;
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      // dirt gathers toward the rim, heavier at the bottom
+      int e = x;
+      if (w - 1 - x < e) e = w - 1 - x;
+      if (y < e) e = y;
+      if ((h - 1 - y) * 2 / 3 < e) e = (h - 1 - y) * 2 / 3;
+      int p = 0;  // chance in 1000
+      if (e < band) p = 260 * (band - e) / band;
+      p += 6;  // scattered dust everywhere
+      int r = rnd(1000);
+      if (r < p) grime_put(x, y, (r < p / 6) ? 2 : 1);
+    }
+  }
+  // a few bigger smudges
+  for (int i = 0; i < 9; i++) {
+    int cx = rnd(w), cy = rnd(h), rr = 2 + rnd(4);
+    for (int k = 0; k < rr * rr * 2; k++) {
+      int dx = rnd(2 * rr + 1) - rr, dy = rnd(2 * rr + 1) - rr;
+      if (dx * dx + dy * dy <= rr * rr) grime_put(cx + dx, cy + dy, 1);
+    }
+  }
+  // rust around the screws, with a streak running down
+  for (int i = 0; i < NUM_SCREWS; i++) {
+    GPoint c = GPoint(X(s_screws[i][0]) - s_content.origin.x, Y(s_screws[i][1]) - s_content.origin.y);
+    int r = X(4) - X(0);
+    for (int k = 0; k < 90; k++) {
+      int dx = rnd(2 * r + 7) - r - 3, dy = rnd(2 * r + 7) - r - 3;
+      int d2 = dx * dx + dy * dy;
+      if (d2 > r * r && d2 <= (r + 3) * (r + 3)) grime_put(c.x + dx, c.y + dy, rnd(3) ? 3 : 2);
+    }
+    int len = 4 + rnd(r * 2);
+    for (int k = 0; k < len; k++) {
+      if (rnd(4)) grime_put(c.x + 1 + (k > len / 2), c.y + r + 2 + k, 3);
+    }
+  }
+}
+
+static void draw_heart(GContext *ctx, GPoint c, int s, GColor col) {
+  graphics_context_set_fill_color(ctx, col);
+  int r = s / 4;
+  graphics_fill_circle(ctx, GPoint(c.x - r, c.y - r / 2), r);
+  graphics_fill_circle(ctx, GPoint(c.x + r, c.y - r / 2), r);
+  GPathInfo info = {
+    .num_points = 3,
+    .points = (GPoint[]){{c.x - 2 * r - 1, c.y - r / 2}, {c.x + 2 * r + 1, c.y - r / 2}, {c.x, c.y + 2 * r}},
+  };
+  GPath *p = gpath_create(&info);
+  gpath_draw_filled(ctx, p);
+  gpath_destroy(p);
+}
+
+// Rotation arrow: black shaft with a heavy head, heart rate printed inside.
+static void draw_arrow(GContext *ctx, GRect r) {
+  int mid = r.origin.y + r.size.h / 2;
+  int head = r.size.h;
+  int x0 = r.origin.x, x1 = r.origin.x + r.size.w;
+  int sh = r.size.h * 7 / 10;
+  graphics_context_set_fill_color(ctx, COL_INK);
+  graphics_fill_rect(ctx, GRect(x0 + 2, mid - sh / 2, x1 - head - x0 - 2, sh), 0, GCornerNone);
+  GPathInfo hd = {
+    .num_points = 3,
+    .points = (GPoint[]){{x1 - head, r.origin.y - 1}, {x1, mid}, {x1 - head, r.origin.y + r.size.h + 1}},
+  };
+  GPath *p = gpath_create(&hd);
+  gpath_draw_filled(ctx, p);
+  gpath_destroy(p);
+  // notched tail
+  GPathInfo tl = {
+    .num_points = 3,
+    .points = (GPoint[]){{x0, mid - sh / 2}, {x0 + sh / 2, mid}, {x0, mid + sh / 2}},
+  };
+  p = gpath_create(&tl);
+  graphics_context_set_fill_color(ctx, COL_PLATE);
+  gpath_draw_filled(ctx, p);
+  gpath_destroy(p);
+
+  char bpm[16];
+  if (s_hr > 0) snprintf(bpm, sizeof(bpm), "%d BPM", s_hr);
+  else strcpy(bpm, "-- BPM");
+  int tw = graphics_text_layout_get_content_size(bpm, s_label_font, GRect(0, 0, 200, 40),
+                                                 GTextOverflowModeFill, GTextAlignmentLeft).w;
+  int hs = sh * 3 / 4;
+  int total = hs + 4 + tw;
+  int cx = x0 + (x1 - head - x0) / 2 - total / 2;
+  draw_heart(ctx, GPoint(cx + hs / 2, mid), hs, PBL_IF_COLOR_ELSE(COL_ACCENT, GColorWhite));
+  graphics_context_set_text_color(ctx, GColorWhite);
+  draw_text_vc(ctx, bpm, s_label_font, s_tiny_fh, GRect(cx + hs + 4, mid - sh / 2, tw + 4, sh),
+               GTextAlignmentLeft);
+  graphics_context_set_text_color(ctx, COL_INK);
+}
+
+// label (plain or inverted) followed by a boxed value
+static void draw_field(GContext *ctx, const char *label, bool inv, int x0, int xl, int x1, int y,
+                       int h, const char *val) {
+  if (label) {
+    if (inv) {
+      graphics_context_set_fill_color(ctx, COL_INK);
+      graphics_fill_rect(ctx, GRect(x0, y, xl - x0, h), 0, GCornerNone);
+      graphics_context_set_text_color(ctx, GColorWhite);
+    }
+    draw_text_vc(ctx, label, s_label_font, s_tiny_fh, GRect(x0 + (inv ? 0 : 1), y, xl - x0, h),
+                 inv ? GTextAlignmentCenter : GTextAlignmentLeft);
+    graphics_context_set_text_color(ctx, COL_INK);
+  }
+  GRect box = GRect(xl, y, x1 - xl, h);
+  graphics_context_set_stroke_color(ctx, COL_INK);
+  graphics_draw_rect(ctx, inv ? GRect(x0, y, x1 - x0, h) : box);
+  draw_text_vc(ctx, val, s_label_font, s_tiny_fh, box, GTextAlignmentCenter);
+}
+
+static void canvas_euro(GContext *ctx, GRect bounds) {
+#if defined(PBL_COLOR)
+  if (s_grime) graphics_draw_bitmap_in_rect(ctx, s_grime, bounds);  // screws are in the texture
+#else
+  if (s_grime) {
+    graphics_context_set_compositing_mode(ctx, GCompOpAnd);
+    graphics_draw_bitmap_in_rect(ctx, s_grime, bounds);
+    graphics_context_set_compositing_mode(ctx, GCompOpAssign);
+  }
+  graphics_context_set_stroke_color(ctx, GColorBlack);
+  graphics_draw_round_rect(ctx, grect_inset(bounds, GEdgeInsets(1)), 4);
+#endif
+
+  graphics_context_set_text_color(ctx, COL_INK);
+  int fh = s_tiny_fh;
+
+  // name window with the CAL LED
+  GRect win = R(4, 2, 34, 10);
+  graphics_context_set_stroke_color(ctx, COL_INK);
+  graphics_draw_rect(ctx, win);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_circle(ctx, s_led_pos, 3);
+  graphics_draw_circle(ctx, s_led_pos, 3);
+  draw_text_vc(ctx, s_saver ? "ECO" : "CAL", s_label_font, fh,
+               GRect(s_led_pos.x + 5, win.origin.y, win.origin.x + win.size.w - s_led_pos.x - 5, win.size.h),
+               GTextAlignmentCenter);
+
+  draw_text_vc(ctx, "kWh", s_info_font, s_info_fh, R(40, 10, 56, 16), GTextAlignmentCenter);
+#if !defined(PBL_COLOR)
+  draw_screw(ctx, GPoint(X(s_screws[0][0]), Y(s_screws[0][1])), X(4) - X(0));
+#endif
+
+  // register: solid black strip with colons between the pairs
+  graphics_context_set_fill_color(ctx, COL_INK);
+  graphics_fill_rect(ctx, s_wheel_window, 3, GCornersAll);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  for (int pair = 1; pair <= 2; pair++) {
+    GRect a = layer_get_frame(s_wheel_layers[pair * 2 - 1]);
+    GRect b = layer_get_frame(s_wheel_layers[pair * 2]);
+    int cx = (a.origin.x + a.size.w + b.origin.x) / 2;
+    int cy = a.origin.y + a.size.h / 2, d = a.size.h / 6, sz = s_big ? 3 : 2;
+    graphics_fill_rect(ctx, GRect(cx - sz / 2, cy - d - sz / 2, sz, sz), 0, GCornerNone);
+    graphics_fill_rect(ctx, GRect(cx - sz / 2, cy + d - sz / 2, sz, sz), 0, GCornerNone);
+  }
+
+  // weather column
+  if (s_wx.valid) {
+    char t[16];
+    snprintf(t, sizeof(t), "%d°", s_wx.temp);
+    draw_text_vc(ctx, t, s_info_font, s_info_fh, R(114, 34, 30, 12), GTextAlignmentCenter);
+    draw_text_vc(ctx, s_wx.cond, s_label_font, fh, R(110, 46, 34, 8), GTextAlignmentCenter);
+    char l1[16], l2[16], l3[16];
+    snprintf(l1, sizeof(l1), "H %d°", s_wx.hi);
+    snprintf(l2, sizeof(l2), "L %d°", s_wx.lo);
+    snprintf(l3, sizeof(l3), "%d%%", s_wx.hum);
+    const char *ls[3] = {l1, l2, l3};
+    GRect bx = R(114, 55, 28, 30);
+    graphics_draw_rect(ctx, bx);
+    for (int i = 0; i < 3; i++) {
+      int y0 = bx.origin.y + bx.size.h * i / 3, y1 = bx.origin.y + bx.size.h * (i + 1) / 3;
+      if (i) graphics_draw_line(ctx, GPoint(bx.origin.x, y0), GPoint(bx.origin.x + bx.size.w - 1, y0));
+      draw_text_vc(ctx, ls[i], s_tiny_font, fh, GRect(bx.origin.x, y0, bx.size.w, y1 - y0),
+                   GTextAlignmentCenter);
+    }
+  } else {
+    draw_text_vc(ctx, "--°", s_info_font, s_info_fh, R(114, 34, 30, 12), GTextAlignmentCenter);
+  }
+
+  // date sticker
+  GRect stk = R(2, 52, 34, 20);
+  graphics_context_set_fill_color(ctx, PBL_IF_COLOR_ELSE(COL_ACCENT, GColorBlack));
+  graphics_fill_rect(ctx, stk, 2, GCornersAll);
+  graphics_context_set_text_color(ctx, GColorWhite);
+  draw_text_vc(ctx, s_date, s_label_font, fh,
+               GRect(stk.origin.x, stk.origin.y + 1, stk.size.w, stk.size.h / 2), GTextAlignmentCenter);
+  draw_text_vc(ctx, s_day, s_label_font, fh,
+               GRect(stk.origin.x, stk.origin.y + stk.size.h / 2 - 1, stk.size.w, stk.size.h / 2),
+               GTextAlignmentCenter);
+  graphics_context_set_text_color(ctx, COL_INK);
+
+  // nameplate text where the maker's mark would be
+  {
+    GRect pr = R(36, 56, 76, 12);
+    GFont f = s_plate_font;
+    int ffh = s_plate_fh;
+    if (graphics_text_layout_get_content_size(s_cfg.plate, f, GRect(0, 0, 400, 60), GTextOverflowModeFill,
+                                              GTextAlignmentLeft).w > pr.size.w) {
+      f = s_label_font;
+      ffh = s_tiny_fh;
+    }
+    draw_text_vc(ctx, s_cfg.plate, f, ffh, pr, GTextAlignmentCenter);
+  }
+
+  draw_hazard(ctx, GPoint(X(15), Y(82)), X(20) - X(0));
+  draw_arrow(ctx, R(34, 71, 76, 12));
+  draw_text_vc(ctx, "KILOWATT-HOUR", s_label_font, fh, R(30, 85, 86, 9), GTextAlignmentCenter);
+#if !defined(PBL_COLOR)
+  for (int i = 1; i < NUM_SCREWS; i++) {
+    draw_screw(ctx, GPoint(X(s_screws[i][0]), Y(s_screws[i][1])), X(4) - X(0));
+  }
+#endif
+
+  // data rows
+  int x0 = X(3), x1 = X(141), rh = Y(11) - Y(0);
+  int y = Y(101);
+  draw_field(ctx, "ACTIVITY", false, x0, X(47), x1, y, rh, s_activity);
+  y = Y(113);
+  draw_field(ctx, "SUNSET", false, x0, X(38), X(70), y, rh, s_wx.valid ? s_wx.sunset : "--:--");
+  draw_field(ctx, "DIST", false, X(74), X(97), x1, y, rh, s_dist);
+  y = Y(125);
+  draw_field(ctx, "DAY", true, x0, X(23), X(42), y, rh, s_yday);
+  draw_field(ctx, NULL, false, X(45), X(45), X(99), y, rh, s_iso);
+  draw_field(ctx, NULL, false, X(102), X(102), x1, y, rh, s_batt);
+  y = Y(137);
+  draw_field(ctx, "SLEEP", true, x0, X(32), X(72), y, rh, s_sleep);
+  draw_field(ctx, NULL, false, X(75), X(75), X(112), y, rh, "50 Hz");
+  GRect bt = GRect(X(115), y, x1 - X(115), rh);
+  graphics_context_set_fill_color(ctx, s_bt_connected ? COL_INK : PBL_IF_COLOR_ELSE(GColorRed, GColorBlack));
+  graphics_fill_rect(ctx, bt, 0, GCornerNone);
+  graphics_context_set_text_color(ctx, GColorWhite);
+  draw_text_vc(ctx, s_bt_connected ? "BT" : "NC", s_label_font, fh, bt, GTextAlignmentCenter);
+  graphics_context_set_text_color(ctx, COL_INK);
+
+  // fine print
+  y = Y(152);
+  draw_text_vc(ctx, s_serial, s_label_font, fh, GRect(x0, y, X(100) - x0, rh), GTextAlignmentLeft);
+  GRect cl = GRect(X(104), y, x1 - X(104), rh);
+  graphics_draw_round_rect(ctx, cl, 2);
+  draw_text_vc(ctx, "CL 1.0", s_label_font, fh, cl, GTextAlignmentCenter);
+}
+
+// Test dial: ten divisions, needle turns with the disc.
+static void dial_update(Layer *layer, GContext *ctx) {
+  GRect b = layer_get_bounds(layer);
+  graphics_context_set_antialiased(ctx, true);
+  GPoint c = grect_center_point(&b);
+  int r = b.size.w / 2 - 1;
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_circle(ctx, c, r);
+  graphics_context_set_stroke_color(ctx, COL_INK);
+  graphics_context_set_stroke_width(ctx, 2);
+  graphics_draw_circle(ctx, c, r);
+  graphics_context_set_stroke_width(ctx, 1);
+  for (int i = 0; i < 50; i++) {
+    int32_t a = TRIG_MAX_ANGLE * i / 50;
+    int len = i % 5 ? 2 : 4;
+    int ro = r - 2, ri = ro - len;
+    GPoint p0 = GPoint(c.x + sin_lookup(a) * ro / TRIG_MAX_RATIO, c.y - cos_lookup(a) * ro / TRIG_MAX_RATIO);
+    GPoint p1 = GPoint(c.x + sin_lookup(a) * ri / TRIG_MAX_RATIO, c.y - cos_lookup(a) * ri / TRIG_MAX_RATIO);
+    if (i % 5 == 0 || r >= 16) graphics_draw_line(ctx, p0, p1);
+  }
+  if (r >= 16) {
+    graphics_context_set_text_color(ctx, COL_INK);
+    for (int i = 0; i < 10; i++) {
+      int32_t a = TRIG_MAX_ANGLE * i / 10;
+      int rn = r - 8;
+      GPoint p = GPoint(c.x + sin_lookup(a) * rn / TRIG_MAX_RATIO, c.y - cos_lookup(a) * rn / TRIG_MAX_RATIO);
+      char n[2] = {(char)('0' + i), 0};
+      graphics_draw_text(ctx, n, fonts_get_system_font(FONT_KEY_GOTHIC_09), GRect(p.x - 6, p.y - 7, 12, 10),
+                         GTextOverflowModeFill, GTextAlignmentCenter, NULL);
+    }
+  }
+  int32_t a = s_disc_angle;
+  int rl = r - 4;
+  graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(COL_ACCENT, GColorBlack));
+  graphics_context_set_stroke_width(ctx, 2);
+  graphics_draw_line(ctx, c, GPoint(c.x + sin_lookup(a) * rl / TRIG_MAX_RATIO,
+                                    c.y - cos_lookup(a) * rl / TRIG_MAX_RATIO));
+  graphics_context_set_stroke_width(ctx, 1);
+  graphics_context_set_fill_color(ctx, COL_INK);
+  graphics_fill_circle(ctx, c, 2);
+}
+
 static void canvas_update(Layer *layer, GContext *ctx) {
   GRect b = layer_get_bounds(layer);
   graphics_context_set_antialiased(ctx, true);
@@ -218,6 +583,10 @@ static void canvas_update(Layer *layer, GContext *ctx) {
 #else
   graphics_fill_rect(ctx, b, 0, GCornerNone);
 #endif
+  if (is_euro()) {
+    canvas_euro(ctx, b);
+    return;
+  }
 
   graphics_context_set_text_color(ctx, COL_INK);
 
@@ -332,9 +701,10 @@ static void overlay_update(Layer *layer, GContext *ctx) {
   if (!s_led_on) return;
   graphics_context_set_antialiased(ctx, true);
   graphics_context_set_fill_color(ctx, COL_ACCENT);
-  graphics_fill_circle(ctx, s_led_pos, 4);
+  int r = is_euro() ? 3 : 4;
+  graphics_fill_circle(ctx, s_led_pos, r);
   graphics_context_set_stroke_color(ctx, GColorBlack);
-  graphics_draw_circle(ctx, s_led_pos, 4);
+  graphics_draw_circle(ctx, s_led_pos, r);
 }
 
 // ---------------------------------------------------------------- drums
@@ -348,7 +718,7 @@ static void draw_digit(GContext *ctx, GRect b, int digit, int center, GColor col
 static void wheel_update(Layer *layer, GContext *ctx) {
   int idx = *(int *)layer_get_data(layer);
   GRect b = layer_get_bounds(layer);
-  bool red = idx == NUM_WHEELS - 1;
+  bool red = idx == NUM_WHEELS - 1 && !is_euro();
   int w = b.size.w, h = b.size.h;
 
   graphics_context_set_fill_color(ctx, red ? COL_RED_WHEEL : COL_WHEEL);
@@ -372,7 +742,8 @@ static void wheel_update(Layer *layer, GContext *ctx) {
   }
 
   // Drum ends: thin dark edges left/right
-  graphics_context_set_stroke_color(ctx, COL_DRUM_EDGE);
+  graphics_context_set_stroke_color(ctx, is_euro() ? PBL_IF_COLOR_ELSE(GColorDarkGray, GColorBlack)
+                                                  : COL_DRUM_EDGE);
   graphics_draw_line(ctx, GPoint(0, 0), GPoint(0, h - 1));
   graphics_draw_line(ctx, GPoint(w - 1, 0), GPoint(w - 1, h - 1));
 #if !defined(PBL_COLOR)
@@ -477,6 +848,8 @@ static void update_date(struct tm *t) {
   strftime(s_day, sizeof(s_day), "%a", t);
   strftime(s_date, sizeof(s_date), "%d %b", t);
   strftime(s_serial, sizeof(s_serial), "No. %Y%m%d", t);
+  strftime(s_iso, sizeof(s_iso), "%Y-%m-%d", t);
+  snprintf(s_yday, sizeof(s_yday), "%d", t->tm_yday + 1);
   upcase(s_day);
   upcase(s_date);
   s_barcode_seed = (uint32_t)(t->tm_year * 400 + t->tm_yday) * 2654435761u;
@@ -566,7 +939,27 @@ static void update_health(void) {
     fmt_thousands(s_steps, sizeof(s_steps), s_steps_today, "steps");
   }
   if (health_service_metric_accessible(HealthMetricActiveKCalories, start, end) & HealthServiceAccessibilityMaskAvailable) {
-    fmt_thousands(s_kcal, sizeof(s_kcal), (int)health_service_sum_today(HealthMetricActiveKCalories), "kcal");
+    s_kcal_v = (int)health_service_sum_today(HealthMetricActiveKCalories);
+    fmt_thousands(s_kcal, sizeof(s_kcal), s_kcal_v, "kcal");
+  }
+  if (health_service_metric_accessible(HealthMetricWalkedDistanceMeters, start, end) & HealthServiceAccessibilityMaskAvailable) {
+    int m = (int)health_service_sum_today(HealthMetricWalkedDistanceMeters);
+    snprintf(s_dist, sizeof(s_dist), "%d.%d km", m / 1000, (m % 1000) / 100);
+  }
+  if (health_service_metric_accessible(HealthMetricActiveSeconds, start, end) & HealthServiceAccessibilityMaskAvailable) {
+    s_active_min = (int)health_service_sum_today(HealthMetricActiveSeconds) / 60;
+  }
+  // last night's sleep counts from 6 pm yesterday
+  if (health_service_metric_accessible(HealthMetricSleepSeconds, start - 6 * 3600, end) & HealthServiceAccessibilityMaskAvailable) {
+    int sl = (int)health_service_sum(HealthMetricSleepSeconds, start - 6 * 3600, end);
+    snprintf(s_sleep, sizeof(s_sleep), "%dh %02dm", sl / 3600, (sl % 3600) / 60);
+  }
+  {
+    char a[12] = "--", b[12] = "--", c[12] = "--";
+    if (s_steps_today >= 0) snprintf(a, sizeof(a), "%d", s_steps_today);
+    if (s_kcal_v >= 0) snprintf(b, sizeof(b), "%d", s_kcal_v);
+    if (s_active_min >= 0) snprintf(c, sizeof(c), "%d", s_active_min);
+    snprintf(s_activity, sizeof(s_activity), "%s / %s / %s", a, b, c);
   }
   if (health_service_metric_accessible(HealthMetricHeartRateBPM, end, end) & HealthServiceAccessibilityMaskAvailable) {
     s_hr = (int)health_service_peek_current_value(HealthMetricHeartRateBPM);
@@ -667,6 +1060,51 @@ static void bt_handler(bool connected) {
 }
 
 // ---------------------------------------------------------------- window
+// Places the drums, disc/dial and LED for the current theme.
+static void layout(void) {
+  bool euro = is_euro();
+  s_wheel_window = euro ? R(6, 30, 104, 24) : R(3, 24, 138, 38);
+  int pad = euro ? 2 : 3;
+  // gaps between drums; the European face leaves room for colons between pairs
+  int gaps[NUM_WHEELS - 1];
+  int gap_total = 0;
+  for (int i = 0; i < NUM_WHEELS - 1; i++) {
+    gaps[i] = euro ? (i % 2 ? (s_big ? 7 : 5) : 1) : 2;
+    gap_total += gaps[i];
+  }
+  int inner_w = s_wheel_window.size.w - 2 * pad;
+  int cw = (inner_w - gap_total) / NUM_WHEELS;
+  int ch = s_wheel_window.size.h - 2 * pad;
+  int x = s_wheel_window.origin.x + pad + (inner_w - (cw * NUM_WHEELS + gap_total)) / 2;
+  s_pitch = ch / 2 + s_glyph_h / 2 + 3;  // neighbours stay hidden
+  for (int i = 0; i < NUM_WHEELS; i++) {
+    layer_set_frame(s_wheel_layers[i], GRect(x, s_wheel_window.origin.y + pad, cw, ch));
+    if (i < NUM_WHEELS - 1) x += cw + gaps[i];
+  }
+
+  if (euro && !s_grime) {
+#if defined(PBL_COLOR)
+    s_grime = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_PLATE);
+#else
+    grime_build(layer_get_bounds(s_canvas).size);
+#endif
+  } else if (!euro && s_grime) {
+    gbitmap_destroy(s_grime);
+    s_grime = NULL;
+  }
+  if (euro) {
+    int r = X(15) - X(0);
+    GPoint c = GPoint(X(126), Y(1) + r);
+    layer_set_frame(s_disc_layer, GRect(c.x - r, c.y - r, 2 * r + 1, 2 * r + 1));
+    layer_set_update_proc(s_disc_layer, dial_update);
+    s_led_pos = GPoint(X(9), Y(7));
+  } else {
+    layer_set_frame(s_disc_layer, R(4, 77, 136, 11));
+    layer_set_update_proc(s_disc_layer, disc_update);
+    s_led_pos = GPoint(X(PBL_IF_ROUND_ELSE(16, 9)), Y(12));
+  }
+}
+
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   GRect b = layer_get_bounds(root);
@@ -701,6 +1139,9 @@ static void window_load(Window *window) {
   s_kwh_font = fonts_get_system_font(big ? FONT_KEY_GOTHIC_28_BOLD : FONT_KEY_GOTHIC_24_BOLD);
   s_info_font = fonts_get_system_font(big ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_18_BOLD);
   s_tiny_font = fonts_get_system_font(big ? FONT_KEY_GOTHIC_14 : FONT_KEY_GOTHIC_09);
+  s_label_font = fonts_get_system_font(big ? FONT_KEY_GOTHIC_14_BOLD : FONT_KEY_GOTHIC_09);
+  s_plate_font = fonts_get_system_font(big ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_14_BOLD);
+  s_plate_fh = big ? 24 : 14;
   s_isi_bmp = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_ISI);
   s_kwh_fh = big ? 28 : 24;
   s_info_fh = big ? 24 : 18;
@@ -710,29 +1151,15 @@ static void window_load(Window *window) {
   layer_set_update_proc(s_canvas, canvas_update);
   layer_add_child(root, s_canvas);
 
-  s_led_pos = GPoint(X(PBL_IF_ROUND_ELSE(16, 9)), Y(12));
-
-  // Drums
-  s_wheel_window = R(3, 24, 138, 38);
-  int pad = 3, gap = 2;
-  int inner_w = s_wheel_window.size.w - 2 * pad;
-  int cw = (inner_w - (NUM_WHEELS - 1) * gap) / NUM_WHEELS;
-  int ch = s_wheel_window.size.h - 2 * pad;
-  int x0 = s_wheel_window.origin.x + pad +
-           (inner_w - (cw * NUM_WHEELS + gap * (NUM_WHEELS - 1))) / 2;
-  s_pitch = ch / 2 + s_glyph_h / 2 + 3;  // neighbours stay hidden
   for (int i = 0; i < NUM_WHEELS; i++) {
-    GRect f = GRect(x0 + i * (cw + gap), s_wheel_window.origin.y + pad, cw, ch);
-    s_wheel_layers[i] = layer_create_with_data(f, sizeof(int));
+    s_wheel_layers[i] = layer_create_with_data(GRectZero, sizeof(int));
     *(int *)layer_get_data(s_wheel_layers[i]) = i;
     layer_set_update_proc(s_wheel_layers[i], wheel_update);
     layer_add_child(root, s_wheel_layers[i]);
   }
-
-  // Disc slot
-  s_disc_layer = layer_create(R(4, 77, 136, 11));
-  layer_set_update_proc(s_disc_layer, disc_update);
+  s_disc_layer = layer_create(GRectZero);
   layer_add_child(root, s_disc_layer);
+  layout();
 
   s_overlay = layer_create(b);
   layer_set_update_proc(s_overlay, overlay_update);
@@ -746,6 +1173,7 @@ static void window_load(Window *window) {
   update_health();
   s_steps_last_min = s_steps_today;
   if (persist_exists(WEATHER_KEY)) persist_read_string(WEATHER_KEY, s_weather, sizeof(s_weather));
+  if (persist_exists(WX_KEY)) persist_read_data(WX_KEY, &s_wx, sizeof(s_wx));
   s_bt_connected = connection_service_peek_pebble_app_connection();
 }
 
@@ -759,6 +1187,8 @@ static void window_unload(Window *window) {
   layer_destroy(s_canvas);
   fonts_unload_custom_font(s_digit_font);
   gbitmap_destroy(s_isi_bmp);
+  if (s_grime) gbitmap_destroy(s_grime);
+  s_grime = NULL;
 }
 
 static void inbox_received(DictionaryIterator *iter, void *context) {
@@ -787,6 +1217,10 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     }
   }
   if ((t = dict_find(iter, MESSAGE_KEY_SaverBelow))) s_cfg.saver_below = (uint8_t)t->value->int32;
+  if ((t = dict_find(iter, MESSAGE_KEY_Theme))) {
+    s_cfg.theme = (t->type == TUPLE_CSTRING) ? (strcmp(t->value->cstring, "euro") == 0 ? THEME_EURO : THEME_INDIA)
+                                             : (uint8_t)t->value->int32;
+  }
   if ((t = dict_find(iter, MESSAGE_KEY_ShakeSeconds))) s_cfg.shake_seconds = t->value->int32 != 0;
   bool unit_changed = false;
   if ((t = dict_find(iter, MESSAGE_KEY_TempUnit))) {
@@ -800,12 +1234,21 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     snprintf(s_weather, sizeof(s_weather), "%d\u00B0%c %s", (int)temp->value->int32,
              s_cfg.temp_f ? 'F' : 'C', cond->value->cstring);
     persist_write_string(WEATHER_KEY, s_weather);
+    s_wx.valid = true;
+    s_wx.temp = (int16_t)temp->value->int32;
+    strncpy(s_wx.cond, cond->value->cstring, sizeof(s_wx.cond) - 1);
+    if ((t = dict_find(iter, MESSAGE_KEY_TempHigh))) s_wx.hi = (int16_t)t->value->int32;
+    if ((t = dict_find(iter, MESSAGE_KEY_TempLow))) s_wx.lo = (int16_t)t->value->int32;
+    if ((t = dict_find(iter, MESSAGE_KEY_Humidity))) s_wx.hum = (uint8_t)t->value->int32;
+    if ((t = dict_find(iter, MESSAGE_KEY_Sunset))) strncpy(s_wx.sunset, t->value->cstring, sizeof(s_wx.sunset) - 1);
+    persist_write_data(WX_KEY, &s_wx, sizeof(s_wx));
     layer_mark_dirty(s_canvas);
     return;  // weather-only message
   }
   persist_write_data(SETTINGS_KEY, &s_cfg, sizeof(s_cfg));
   if (unit_changed) request_weather();
   update_load();
+  layout();
   power_apply();
   layer_mark_dirty(window_get_root_layer(s_window));
 }
