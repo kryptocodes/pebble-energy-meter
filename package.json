@@ -1,0 +1,116 @@
+{
+  "name": "energy-meter",
+  "author": "Srivatsan Balaji",
+  "version": "1.0.0",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {
+    "pebble-clay": "^1.0.4"
+  },
+  "pebble": {
+    "displayName": "Energy Meter",
+    "uuid": "19cfcf14-ce39-46e2-8926-35d10517dea6",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": true
+    },
+    "messageKeys": [
+      "PlateText",
+      "RatingsMode",
+      "DiscActivity",
+      "DiscSmooth",
+      "LedBlink",
+      "VibeDisconnect",
+      "AccentColor",
+      "TempUnit",
+      "Temperature",
+      "Conditions",
+      "RequestWeather",
+      "PowerMode",
+      "SaverBelow",
+      "ShakeSeconds"
+    ],
+    "resources": {
+      "media": [
+        {
+          "type": "font",
+          "name": "FONT_DRUM_24",
+          "file": "fonts/Arimo-Bold.ttf",
+          "characterRegex": "[0-9]",
+          "targetPlatforms": [
+            "basalt",
+            "diorite"
+          ]
+        },
+        {
+          "type": "font",
+          "name": "FONT_DRUM_20",
+          "file": "fonts/Arimo-Bold.ttf",
+          "characterRegex": "[0-9]",
+          "targetPlatforms": [
+            "chalk"
+          ]
+        },
+        {
+          "type": "font",
+          "name": "FONT_DRUM_34",
+          "file": "fonts/Arimo-Bold.ttf",
+          "characterRegex": "[0-9]",
+          "targetPlatforms": [
+            "emery"
+          ]
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ISI",
+          "file": "images/isi_28.png",
+          "targetPlatforms": [
+            "basalt",
+            "diorite"
+          ]
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ISI",
+          "file": "images/isi_24.png",
+          "targetPlatforms": [
+            "chalk"
+          ]
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ISI",
+          "file": "images/isi_36.png",
+          "targetPlatforms": [
+            "emery"
+          ]
+        }
+      ]
+    },
+    "capabilities": [
+      "health",
+      "configurable",
+      "location"
+    ],
+    "usesPermissions": [
+      "Location",
+      {
+        "name": "Internet",
+        "parameters": {
+          "domains": [
+            "api.open-meteo.com"
+          ]
+        }
+      }
+    ]
+  }
+}

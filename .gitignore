@@ -1,0 +1,8 @@
+build/
+node_modules/
+.lock-waf*
+*.pbw
+.DS_Store
+shots/
+designs/
+resources/fonts/BarlowCondensed-SemiBold.ttf
