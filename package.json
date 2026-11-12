@@ -38,10 +38,6 @@
       "PowerMode",
       "SaverBelow",
       "ShakeSeconds",
-      "TempHigh",
-      "TempLow",
-      "Humidity",
-      "Sunset",
       "Theme"
     ],
     "resources": {
@@ -104,14 +100,37 @@
           "name": "IMAGE_PLATE",
           "file": "images/plate_144.png",
           "targetPlatforms": [
-            "basalt",
-            "chalk"
+            "basalt"
           ]
         },
         {
           "type": "bitmap",
           "name": "IMAGE_PLATE",
           "file": "images/plate_200.png",
+          "targetPlatforms": [
+            "emery"
+          ]
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_PLATE_IN",
+          "file": "images/plate_in_144.png",
+          "targetPlatforms": [
+            "basalt"
+          ]
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_PLATE_IN",
+          "file": "images/plate_in_180.png",
+          "targetPlatforms": [
+            "chalk"
+          ]
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_PLATE_IN",
+          "file": "images/plate_in_200.png",
           "targetPlatforms": [
             "emery"
           ]

@@ -47,19 +47,16 @@ static int32_t s_disc_step = DISC_STEP_MIN;
 
 // Health
 static char s_steps[20] = "-- steps", s_kcal[16] = "-- kcal";
-static char s_dist[16] = "-- km", s_sleep[24] = "--", s_activity[40] = "-- / -- / --";
-static int s_kcal_v = -1, s_active_min = -1;
+static int s_kcal_v = -1;
 
 // Weather (fetched by the phone), kept across restarts
 #define WEATHER_KEY 2
 static char s_weather[24] = "-- \u00B0";
-#define WX_KEY 3
+#define WX_KEY 4
 typedef struct {
   bool valid;
-  int16_t temp, hi, lo;
-  uint8_t hum;
+  int16_t temp;
   char cond[12];
-  char sunset[6];
 } Weather;
 static Weather s_wx;
 static int s_steps_today = -1, s_steps_last_min = -1, s_spm, s_hr;
@@ -70,6 +67,8 @@ static bool s_bt_connected = true;
 
 static GFont s_digit_font, s_kwh_font, s_info_font, s_tiny_font, s_label_font, s_plate_font;
 static int s_plate_fh;
+static GFont s_value_font;
+static int s_value_fh;
 static GBitmap *s_isi_bmp;
 static bool s_big;
 
@@ -225,8 +224,8 @@ static void draw_barcode(GContext *ctx, GRect r) {
 }
 
 // ---------------------------------------------------------------- European face
-// Screw positions (design units) - also used to place rust in the grime map.
-static const int16_t s_screws[][2] = {{9, 21}, {8, 95}, {136, 95}};
+// Screw positions in design units (the colour texture has them baked in).
+__attribute__((unused)) static const int16_t s_screws[][2] = {{9, 21}, {8, 95}, {136, 95}};
 #define NUM_SCREWS 3
 
 // Slotted screw head: shaded dome, dark slot, small highlight.
@@ -245,86 +244,9 @@ __attribute__((unused)) static void draw_screw(GContext *ctx, GPoint c, int r) {
   graphics_context_set_stroke_width(ctx, 1);
 }
 
-// ---- plate texture: a dithered photo-style PNG on colour watches,
-// procedural grime on black & white ones
-static GBitmap *s_grime;
-static uint32_t s_rng;
-static int rnd(int n) {
-  s_rng = s_rng * 1103515245u + 12345u;
-  return (int)((s_rng >> 16) % (uint32_t)n);
-}
-
-// v: 0 = clean, 1 = light dust, 2 = dark speck, 3 = rust
-static void grime_put(int x, int y, int v) {
-  GBitmapDataRowInfo row = gbitmap_get_data_row_info(s_grime, y);
-  if (x < row.min_x || x > row.max_x) return;
-#if defined(PBL_COLOR)
-  uint8_t *b = &row.data[x / 4];
-  int sh = (3 - x % 4) * 2;
-  *b = (*b & ~(3 << sh)) | (v << sh);
-#else
-  if (v == 1) return;  // dust is invisible on B/W
-  row.data[x / 8] &= ~(1 << (x % 8));  // black speck
-#endif
-}
-
-__attribute__((unused)) static void grime_build(GSize sz) {
-  if (s_grime) gbitmap_destroy(s_grime);
-#if defined(PBL_COLOR)
-  static GColor pal[4];
-  pal[0] = GColorClear;
-  pal[1] = GColorLightGray;
-  pal[2] = GColorDarkGray;
-  pal[3] = GColorWindsorTan;
-  s_grime = gbitmap_create_blank_with_palette(sz, GBitmapFormat2BitPalette, pal, false);
-#else
-  s_grime = gbitmap_create_blank(sz, GBitmapFormat1Bit);
-  for (int y = 0; y < sz.h; y++) {
-    GBitmapDataRowInfo row = gbitmap_get_data_row_info(s_grime, y);
-    memset(row.data, 0xFF, gbitmap_get_bytes_per_row(s_grime));
-  }
-#endif
-  if (!s_grime) return;
-  s_rng = 1234567u;
-  int w = sz.w, h = sz.h;
-  int band = w / 12;
-  for (int y = 0; y < h; y++) {
-    for (int x = 0; x < w; x++) {
-      // dirt gathers toward the rim, heavier at the bottom
-      int e = x;
-      if (w - 1 - x < e) e = w - 1 - x;
-      if (y < e) e = y;
-      if ((h - 1 - y) * 2 / 3 < e) e = (h - 1 - y) * 2 / 3;
-      int p = 0;  // chance in 1000
-      if (e < band) p = 260 * (band - e) / band;
-      p += 6;  // scattered dust everywhere
-      int r = rnd(1000);
-      if (r < p) grime_put(x, y, (r < p / 6) ? 2 : 1);
-    }
-  }
-  // a few bigger smudges
-  for (int i = 0; i < 9; i++) {
-    int cx = rnd(w), cy = rnd(h), rr = 2 + rnd(4);
-    for (int k = 0; k < rr * rr * 2; k++) {
-      int dx = rnd(2 * rr + 1) - rr, dy = rnd(2 * rr + 1) - rr;
-      if (dx * dx + dy * dy <= rr * rr) grime_put(cx + dx, cy + dy, 1);
-    }
-  }
-  // rust around the screws, with a streak running down
-  for (int i = 0; i < NUM_SCREWS; i++) {
-    GPoint c = GPoint(X(s_screws[i][0]) - s_content.origin.x, Y(s_screws[i][1]) - s_content.origin.y);
-    int r = X(4) - X(0);
-    for (int k = 0; k < 90; k++) {
-      int dx = rnd(2 * r + 7) - r - 3, dy = rnd(2 * r + 7) - r - 3;
-      int d2 = dx * dx + dy * dy;
-      if (d2 > r * r && d2 <= (r + 3) * (r + 3)) grime_put(c.x + dx, c.y + dy, rnd(3) ? 3 : 2);
-    }
-    int len = 4 + rnd(r * 2);
-    for (int k = 0; k < len; k++) {
-      if (rnd(4)) grime_put(c.x + 1 + (k > len / 2), c.y + r + 2 + k, 3);
-    }
-  }
-}
+// plate texture (colour watches only)
+static GBitmap *s_plate_bmp;
+static uint32_t s_plate_res;
 
 static void draw_heart(GContext *ctx, GPoint c, int s, GColor col) {
   graphics_context_set_fill_color(ctx, col);
@@ -396,18 +318,20 @@ static void draw_field(GContext *ctx, const char *label, bool inv, int x0, int x
   GRect box = GRect(xl, y, x1 - xl, h);
   graphics_context_set_stroke_color(ctx, COL_INK);
   graphics_draw_rect(ctx, inv ? GRect(x0, y, x1 - x0, h) : box);
-  draw_text_vc(ctx, val, s_label_font, s_tiny_fh, box, GTextAlignmentCenter);
+  GFont vf = s_value_font;
+  int vfh = s_value_fh;
+  if (graphics_text_layout_get_content_size(val, vf, GRect(0, 0, 400, 60), GTextOverflowModeFill,
+                                            GTextAlignmentLeft).w > box.size.w - 2) {
+    vf = s_label_font;
+    vfh = s_tiny_fh;
+  }
+  draw_text_vc(ctx, val, vf, vfh, box, GTextAlignmentCenter);
 }
 
 static void canvas_euro(GContext *ctx, GRect bounds) {
 #if defined(PBL_COLOR)
-  if (s_grime) graphics_draw_bitmap_in_rect(ctx, s_grime, bounds);  // screws are in the texture
+  if (s_plate_bmp) graphics_draw_bitmap_in_rect(ctx, s_plate_bmp, bounds);  // screws are in the texture
 #else
-  if (s_grime) {
-    graphics_context_set_compositing_mode(ctx, GCompOpAnd);
-    graphics_draw_bitmap_in_rect(ctx, s_grime, bounds);
-    graphics_context_set_compositing_mode(ctx, GCompOpAssign);
-  }
   graphics_context_set_stroke_color(ctx, GColorBlack);
   graphics_draw_round_rect(ctx, grect_inset(bounds, GEdgeInsets(1)), 4);
 #endif
@@ -444,27 +368,15 @@ static void canvas_euro(GContext *ctx, GRect bounds) {
     graphics_fill_rect(ctx, GRect(cx - sz / 2, cy + d - sz / 2, sz, sz), 0, GCornerNone);
   }
 
-  // weather column
-  if (s_wx.valid) {
+  // weather
+  {
     char t[16];
-    snprintf(t, sizeof(t), "%d°", s_wx.temp);
-    draw_text_vc(ctx, t, s_info_font, s_info_fh, R(114, 34, 30, 12), GTextAlignmentCenter);
-    draw_text_vc(ctx, s_wx.cond, s_label_font, fh, R(110, 46, 34, 8), GTextAlignmentCenter);
-    char l1[16], l2[16], l3[16];
-    snprintf(l1, sizeof(l1), "H %d°", s_wx.hi);
-    snprintf(l2, sizeof(l2), "L %d°", s_wx.lo);
-    snprintf(l3, sizeof(l3), "%d%%", s_wx.hum);
-    const char *ls[3] = {l1, l2, l3};
-    GRect bx = R(114, 55, 28, 30);
-    graphics_draw_rect(ctx, bx);
-    for (int i = 0; i < 3; i++) {
-      int y0 = bx.origin.y + bx.size.h * i / 3, y1 = bx.origin.y + bx.size.h * (i + 1) / 3;
-      if (i) graphics_draw_line(ctx, GPoint(bx.origin.x, y0), GPoint(bx.origin.x + bx.size.w - 1, y0));
-      draw_text_vc(ctx, ls[i], s_tiny_font, fh, GRect(bx.origin.x, y0, bx.size.w, y1 - y0),
-                   GTextAlignmentCenter);
+    if (s_wx.valid) snprintf(t, sizeof(t), "%d\u00B0", s_wx.temp);
+    else strcpy(t, "--\u00B0");
+    draw_text_vc(ctx, t, s_info_font, s_info_fh, R(112, 34, 32, 13), GTextAlignmentCenter);
+    if (s_wx.valid) {
+      draw_text_vc(ctx, s_wx.cond, s_label_font, fh, R(108, 47, 36, 9), GTextAlignmentCenter);
     }
-  } else {
-    draw_text_vc(ctx, "--°", s_info_font, s_info_fh, R(114, 34, 30, 12), GTextAlignmentCenter);
   }
 
   // date sticker
@@ -493,8 +405,8 @@ static void canvas_euro(GContext *ctx, GRect bounds) {
   }
 
   draw_hazard(ctx, GPoint(X(15), Y(82)), X(20) - X(0));
-  draw_arrow(ctx, R(34, 71, 76, 12));
-  draw_text_vc(ctx, "KILOWATT-HOUR", s_label_font, fh, R(30, 85, 86, 9), GTextAlignmentCenter);
+  draw_arrow(ctx, R(38, 70, 98, 13));
+  draw_text_vc(ctx, "KILOWATT-HOUR", s_label_font, fh, R(38, 85, 92, 9), GTextAlignmentCenter);
 #if !defined(PBL_COLOR)
   for (int i = 1; i < NUM_SCREWS; i++) {
     draw_screw(ctx, GPoint(X(s_screws[i][0]), Y(s_screws[i][1])), X(4) - X(0));
@@ -502,32 +414,31 @@ static void canvas_euro(GContext *ctx, GRect bounds) {
 #endif
 
   // data rows
-  int x0 = X(3), x1 = X(141), rh = Y(11) - Y(0);
-  int y = Y(101);
-  draw_field(ctx, "ACTIVITY", false, x0, X(47), x1, y, rh, s_activity);
-  y = Y(113);
-  draw_field(ctx, "SUNSET", false, x0, X(38), X(70), y, rh, s_wx.valid ? s_wx.sunset : "--:--");
-  draw_field(ctx, "DIST", false, X(74), X(97), x1, y, rh, s_dist);
-  y = Y(125);
-  draw_field(ctx, "DAY", true, x0, X(23), X(42), y, rh, s_yday);
-  draw_field(ctx, NULL, false, X(45), X(45), X(99), y, rh, s_iso);
-  draw_field(ctx, NULL, false, X(102), X(102), x1, y, rh, s_batt);
-  y = Y(137);
-  draw_field(ctx, "SLEEP", true, x0, X(32), X(72), y, rh, s_sleep);
-  draw_field(ctx, NULL, false, X(75), X(75), X(112), y, rh, "50 Hz");
-  GRect bt = GRect(X(115), y, x1 - X(115), rh);
-  graphics_context_set_fill_color(ctx, s_bt_connected ? COL_INK : PBL_IF_COLOR_ELSE(GColorRed, GColorBlack));
-  graphics_fill_rect(ctx, bt, 0, GCornerNone);
-  graphics_context_set_text_color(ctx, GColorWhite);
-  draw_text_vc(ctx, s_bt_connected ? "BT" : "NC", s_label_font, fh, bt, GTextAlignmentCenter);
-  graphics_context_set_text_color(ctx, COL_INK);
+  int x0 = X(3), x1 = X(141), rh = Y(14) - Y(0);
+  char steps[12] = "--", kcal[12] = "--";
+  if (s_steps_today >= 0) snprintf(steps, sizeof(steps), "%d", s_steps_today);
+  if (s_kcal_v >= 0) snprintf(kcal, sizeof(kcal), "%d", s_kcal_v);
+  int y = Y(102);
+  draw_field(ctx, "STEPS", false, x0, X(31), X(78), y, rh, steps);
+  draw_field(ctx, "KCAL", false, X(84), X(108), x1, y, rh, kcal);
+  y = Y(121);
+  draw_field(ctx, "DAY", true, x0, X(22), X(41), y, rh, s_yday);
+  draw_field(ctx, NULL, false, X(44), X(44), X(106), y, rh, s_iso);
+  draw_field(ctx, NULL, false, X(109), X(109), x1, y, rh, s_batt);
 
-  // fine print
-  y = Y(152);
-  draw_text_vc(ctx, s_serial, s_label_font, fh, GRect(x0, y, X(100) - x0, rh), GTextAlignmentLeft);
-  GRect cl = GRect(X(104), y, x1 - X(104), rh);
+  // fine print, class and phone seal
+  y = Y(142);
+  draw_text_vc(ctx, s_serial, s_label_font, fh, GRect(x0, y, X(72) - x0, rh), GTextAlignmentLeft);
+  GRect cl = GRect(X(76), y, X(106) - X(76), rh);
+  graphics_context_set_stroke_color(ctx, COL_INK);
   graphics_draw_round_rect(ctx, cl, 2);
   draw_text_vc(ctx, "CL 1.0", s_label_font, fh, cl, GTextAlignmentCenter);
+  GRect bt = GRect(X(110), y, x1 - X(110), rh);
+  graphics_context_set_fill_color(ctx, s_bt_connected ? COL_INK : PBL_IF_COLOR_ELSE(GColorRed, GColorBlack));
+  graphics_fill_rect(ctx, bt, 2, GCornersAll);
+  graphics_context_set_text_color(ctx, GColorWhite);
+  draw_text_vc(ctx, s_bt_connected ? "BT" : "NC", s_value_font, s_value_fh, bt, GTextAlignmentCenter);
+  graphics_context_set_text_color(ctx, COL_INK);
 }
 
 // Test dial: ten divisions, needle turns with the disc.
@@ -550,17 +461,6 @@ static void dial_update(Layer *layer, GContext *ctx) {
     GPoint p1 = GPoint(c.x + sin_lookup(a) * ri / TRIG_MAX_RATIO, c.y - cos_lookup(a) * ri / TRIG_MAX_RATIO);
     if (i % 5 == 0 || r >= 16) graphics_draw_line(ctx, p0, p1);
   }
-  if (r >= 16) {
-    graphics_context_set_text_color(ctx, COL_INK);
-    for (int i = 0; i < 10; i++) {
-      int32_t a = TRIG_MAX_ANGLE * i / 10;
-      int rn = r - 8;
-      GPoint p = GPoint(c.x + sin_lookup(a) * rn / TRIG_MAX_RATIO, c.y - cos_lookup(a) * rn / TRIG_MAX_RATIO);
-      char n[2] = {(char)('0' + i), 0};
-      graphics_draw_text(ctx, n, fonts_get_system_font(FONT_KEY_GOTHIC_09), GRect(p.x - 6, p.y - 7, 12, 10),
-                         GTextOverflowModeFill, GTextAlignmentCenter, NULL);
-    }
-  }
   int32_t a = s_disc_angle;
   int rl = r - 4;
   graphics_context_set_stroke_color(ctx, PBL_IF_COLOR_ELSE(COL_ACCENT, GColorBlack));
@@ -577,12 +477,16 @@ static void canvas_update(Layer *layer, GContext *ctx) {
   graphics_context_set_antialiased(ctx, true);
 
   // ---- full-screen nameplate
-  graphics_context_set_fill_color(ctx, COL_PLATE);
+  if (s_plate_bmp && !is_euro()) {
+    graphics_draw_bitmap_in_rect(ctx, s_plate_bmp, b);
+  } else {
+    graphics_context_set_fill_color(ctx, COL_PLATE);
 #if defined(PBL_ROUND)
-  graphics_fill_circle(ctx, grect_center_point(&b), b.size.w / 2);
+    graphics_fill_circle(ctx, grect_center_point(&b), b.size.w / 2);
 #else
-  graphics_fill_rect(ctx, b, 0, GCornerNone);
+    graphics_fill_rect(ctx, b, 0, GCornerNone);
 #endif
+  }
   if (is_euro()) {
     canvas_euro(ctx, b);
     return;
@@ -942,25 +846,6 @@ static void update_health(void) {
     s_kcal_v = (int)health_service_sum_today(HealthMetricActiveKCalories);
     fmt_thousands(s_kcal, sizeof(s_kcal), s_kcal_v, "kcal");
   }
-  if (health_service_metric_accessible(HealthMetricWalkedDistanceMeters, start, end) & HealthServiceAccessibilityMaskAvailable) {
-    int m = (int)health_service_sum_today(HealthMetricWalkedDistanceMeters);
-    snprintf(s_dist, sizeof(s_dist), "%d.%d km", m / 1000, (m % 1000) / 100);
-  }
-  if (health_service_metric_accessible(HealthMetricActiveSeconds, start, end) & HealthServiceAccessibilityMaskAvailable) {
-    s_active_min = (int)health_service_sum_today(HealthMetricActiveSeconds) / 60;
-  }
-  // last night's sleep counts from 6 pm yesterday
-  if (health_service_metric_accessible(HealthMetricSleepSeconds, start - 6 * 3600, end) & HealthServiceAccessibilityMaskAvailable) {
-    int sl = (int)health_service_sum(HealthMetricSleepSeconds, start - 6 * 3600, end);
-    snprintf(s_sleep, sizeof(s_sleep), "%dh %02dm", sl / 3600, (sl % 3600) / 60);
-  }
-  {
-    char a[12] = "--", b[12] = "--", c[12] = "--";
-    if (s_steps_today >= 0) snprintf(a, sizeof(a), "%d", s_steps_today);
-    if (s_kcal_v >= 0) snprintf(b, sizeof(b), "%d", s_kcal_v);
-    if (s_active_min >= 0) snprintf(c, sizeof(c), "%d", s_active_min);
-    snprintf(s_activity, sizeof(s_activity), "%s / %s / %s", a, b, c);
-  }
   if (health_service_metric_accessible(HealthMetricHeartRateBPM, end, end) & HealthServiceAccessibilityMaskAvailable) {
     s_hr = (int)health_service_peek_current_value(HealthMetricHeartRateBPM);
   }
@@ -1082,16 +967,16 @@ static void layout(void) {
     if (i < NUM_WHEELS - 1) x += cw + gaps[i];
   }
 
-  if (euro && !s_grime) {
 #if defined(PBL_COLOR)
-    s_grime = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_PLATE);
-#else
-    grime_build(layer_get_bounds(s_canvas).size);
-#endif
-  } else if (!euro && s_grime) {
-    gbitmap_destroy(s_grime);
-    s_grime = NULL;
+  // plate texture for the current theme
+  uint32_t res = PBL_IF_ROUND_ELSE(RESOURCE_ID_IMAGE_PLATE_IN,
+                                   euro ? RESOURCE_ID_IMAGE_PLATE : RESOURCE_ID_IMAGE_PLATE_IN);
+  if (res != s_plate_res) {
+    if (s_plate_bmp) gbitmap_destroy(s_plate_bmp);
+    s_plate_bmp = gbitmap_create_with_resource(res);
+    s_plate_res = res;
   }
+#endif
   if (euro) {
     int r = X(15) - X(0);
     GPoint c = GPoint(X(126), Y(1) + r);
@@ -1142,6 +1027,8 @@ static void window_load(Window *window) {
   s_label_font = fonts_get_system_font(big ? FONT_KEY_GOTHIC_14_BOLD : FONT_KEY_GOTHIC_09);
   s_plate_font = fonts_get_system_font(big ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_14_BOLD);
   s_plate_fh = big ? 24 : 14;
+  s_value_font = fonts_get_system_font(big ? FONT_KEY_GOTHIC_18_BOLD : FONT_KEY_GOTHIC_14_BOLD);
+  s_value_fh = big ? 18 : 14;
   s_isi_bmp = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_ISI);
   s_kwh_fh = big ? 28 : 24;
   s_info_fh = big ? 24 : 18;
@@ -1187,8 +1074,9 @@ static void window_unload(Window *window) {
   layer_destroy(s_canvas);
   fonts_unload_custom_font(s_digit_font);
   gbitmap_destroy(s_isi_bmp);
-  if (s_grime) gbitmap_destroy(s_grime);
-  s_grime = NULL;
+  if (s_plate_bmp) gbitmap_destroy(s_plate_bmp);
+  s_plate_bmp = NULL;
+  s_plate_res = 0;
 }
 
 static void inbox_received(DictionaryIterator *iter, void *context) {
@@ -1237,10 +1125,6 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
     s_wx.valid = true;
     s_wx.temp = (int16_t)temp->value->int32;
     strncpy(s_wx.cond, cond->value->cstring, sizeof(s_wx.cond) - 1);
-    if ((t = dict_find(iter, MESSAGE_KEY_TempHigh))) s_wx.hi = (int16_t)t->value->int32;
-    if ((t = dict_find(iter, MESSAGE_KEY_TempLow))) s_wx.lo = (int16_t)t->value->int32;
-    if ((t = dict_find(iter, MESSAGE_KEY_Humidity))) s_wx.hum = (uint8_t)t->value->int32;
-    if ((t = dict_find(iter, MESSAGE_KEY_Sunset))) strncpy(s_wx.sunset, t->value->cstring, sizeof(s_wx.sunset) - 1);
     persist_write_data(WX_KEY, &s_wx, sizeof(s_wx));
     layer_mark_dirty(s_canvas);
     return;  // weather-only message

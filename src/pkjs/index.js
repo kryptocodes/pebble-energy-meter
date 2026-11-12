@@ -30,22 +30,15 @@ function fetchWeather(unitFromWatch) {
     var url = 'https://api.open-meteo.com/v1/forecast' +
       '?latitude=' + pos.coords.latitude.toFixed(2) +
       '&longitude=' + pos.coords.longitude.toFixed(2) +
-      '&current=temperature_2m,weather_code,is_day,relative_humidity_2m' +
-      '&daily=temperature_2m_max,temperature_2m_min,sunset&timezone=auto&forecast_days=1' +
+      '&current=temperature_2m,weather_code,is_day' +
       (fahrenheit ? '&temperature_unit=fahrenheit' : '');
     var xhr = new XMLHttpRequest();
     xhr.onload = function () {
       try {
-        var data = JSON.parse(this.responseText);
-        var c = data.current;
-        var d = data.daily;
+        var c = JSON.parse(this.responseText).current;
         Pebble.sendAppMessage({
           Temperature: Math.round(c.temperature_2m),
-          Conditions: CONDITIONS(c.weather_code, c.is_day === 1),
-          TempHigh: Math.round(d.temperature_2m_max[0]),
-          TempLow: Math.round(d.temperature_2m_min[0]),
-          Humidity: Math.round(c.relative_humidity_2m),
-          Sunset: d.sunset[0].slice(11, 16)
+          Conditions: CONDITIONS(c.weather_code, c.is_day === 1)
         });
       } catch (e) {
         console.log('weather parse failed: ' + e);
