@@ -48,7 +48,7 @@ The European style is available on rectangular watches; Pebble Time Round uses t
 | Auto *(default)* | Switches to saver when the battery falls below a set level (10–50 %) and is not charging. |
 | Always | Saver at all times. |
 
-In saver mode the face wakes once a minute instead of once a second. The seconds drums are parked, the disc steps once per minute, the LED is off and its label reads `ECO`. A wrist flick shows seconds for 30 seconds.
+In saver mode the face wakes once a minute instead of once a second. The seconds drums are parked, the disc steps once per minute, the LED is off and its label reads `ECO`. A wrist flick shows seconds for 30 seconds, with the LED blinking again.
 
 ## Configuration
 
