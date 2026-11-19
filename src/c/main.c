@@ -800,7 +800,7 @@ static void update_time(struct tm *t, bool animate) {
     animation_set_curve(s_anim, AnimationCurveEaseInOut);
     animation_set_implementation(s_anim, &s_anim_impl);
     animation_schedule(s_anim);
-    if (s_cfg.led_blink && !s_saver) led_pulse();
+    if (s_cfg.led_blink && show_seconds()) led_pulse();  // also during a shake peek in ECO
   }
 }
 
